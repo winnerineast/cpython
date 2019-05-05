@@ -1,6 +1,10 @@
 import os
+import signal
 import socket
 import sys
+import subprocess
+import time
+import threading
 import unittest
 from unittest import mock
 
@@ -8,11 +12,17 @@ if sys.platform != 'win32':
     raise unittest.SkipTest('Windows only')
 
 import _overlapped
+import _testcapi
 import _winapi
 
 import asyncio
-from asyncio import test_utils
 from asyncio import windows_events
+from test.test_asyncio import utils as test_utils
+from test.support.script_helper import spawn_python
+
+
+def tearDownModule():
+    asyncio.set_event_loop_policy(None)
 
 
 class UpperProto(asyncio.Protocol):
@@ -29,6 +39,27 @@ class UpperProto(asyncio.Protocol):
             self.trans.close()
 
 
+class ProactorLoopCtrlC(test_utils.TestCase):
+
+    def test_ctrl_c(self):
+
+        def SIGINT_after_delay():
+            time.sleep(1)
+            signal.raise_signal(signal.SIGINT)
+
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        l = asyncio.get_event_loop()
+        try:
+            t = threading.Thread(target=SIGINT_after_delay)
+            t.start()
+            l.run_forever()
+            self.fail("should not fall through 'run_forever'")
+        except KeyboardInterrupt:
+            pass
+        finally:
+            l.close()
+
+
 class ProactorTests(test_utils.TestCase):
 
     def setUp(self):
@@ -39,7 +70,7 @@ class ProactorTests(test_utils.TestCase):
     def test_close(self):
         a, b = socket.socketpair()
         trans = self.loop._make_socket_transport(a, asyncio.Protocol())
-        f = asyncio.ensure_future(self.loop.sock_recv(b, 100))
+        f = asyncio.ensure_future(self.loop.sock_recv(b, 100), loop=self.loop)
         trans.close()
         self.loop.run_until_complete(f)
         self.assertEqual(f.result(), b'')
@@ -160,6 +191,37 @@ class ProactorTests(test_utils.TestCase):
         fut = self.loop._proactor.wait_for_handle(event)
         fut.cancel()
         fut.cancel()
+
+
+class WinPolicyTests(test_utils.TestCase):
+
+    def test_selector_win_policy(self):
+        async def main():
+            self.assertIsInstance(
+                asyncio.get_running_loop(),
+                asyncio.SelectorEventLoop)
+
+        old_policy = asyncio.get_event_loop_policy()
+        try:
+            asyncio.set_event_loop_policy(
+                asyncio.WindowsSelectorEventLoopPolicy())
+            asyncio.run(main())
+        finally:
+            asyncio.set_event_loop_policy(old_policy)
+
+    def test_proactor_win_policy(self):
+        async def main():
+            self.assertIsInstance(
+                asyncio.get_running_loop(),
+                asyncio.ProactorEventLoop)
+
+        old_policy = asyncio.get_event_loop_policy()
+        try:
+            asyncio.set_event_loop_policy(
+                asyncio.WindowsProactorEventLoopPolicy())
+            asyncio.run(main())
+        finally:
+            asyncio.set_event_loop_policy(old_policy)
 
 
 if __name__ == '__main__':
